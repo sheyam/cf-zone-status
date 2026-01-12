@@ -74,13 +74,35 @@ jobs:
             -ov -format UDZO \
             build/cf-zone-status.dmg
       
-      - name: Zip app 
+      - name: Zip app (like CloudflareStatusBar)
         run: |
           # Create ZIP with app directly at root (like CloudflareStatusBar)
           cd build/dmg
           zip -r ../cf-zone-status.zip cf-zone-status.app
           cd ../..
-          
+          # Verify ZIP was created
+          if [ ! -f "build/cf-zone-status.zip" ]; then
+            echo "Error: ZIP file was not created"
+            exit 1
+          fi
+          ls -lh build/cf-zone-status.zip
+      
+      - name: Verify release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Verifying release artifacts..."
+          if [ ! -f "build/cf-zone-status.dmg" ]; then
+            echo "Error: DMG file not found"
+            exit 1
+          fi
+          if [ ! -f "build/cf-zone-status.zip" ]; then
+            echo "Error: ZIP file not found"
+            exit 1
+          fi
+          echo "DMG size: $(ls -lh build/cf-zone-status.dmg | awk '{print $5}')"
+          echo "ZIP size: $(ls -lh build/cf-zone-status.zip | awk '{print $5}')"
+          echo "Release artifacts verified successfully"
+      
       - name: Extract version from tag
         id: tag_version
         run: |
