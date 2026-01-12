@@ -1,0 +1,103 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest-stable'
+      
+      - name: Build app
+        run: |
+          cd xcode/cf-zone-status
+          xcodebuild -project cf-zone-status.xcodeproj \
+            -scheme cf-zone-status \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath ../../build/cf-zone-status.xcarchive \
+            archive \
+            SDKROOT=macosx \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      
+      - name: Extract app from archive
+        run: |
+          # Extract app directly from archive (no export needed for unsigned builds)
+          mkdir -p build/export
+          cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/export/ || true
+      
+      - name: Create DMG
+        run: |
+          mkdir -p build/dmg
+          cp -R build/export/cf-zone-status.app build/dmg/ || \
+            cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/dmg/
+          ln -s /Applications build/dmg/Applications
+          
+          hdiutil create -volname "cf-zone-status" \
+            -srcfolder build/dmg \
+            -ov -format UDZO \
+            build/cf-zone-status.dmg
+      
+      - name: Zip app (like CloudflareStatusBar)
+        run: |
+          # Create ZIP with app directly at root (like CloudflareStatusBar)
+          cd build/dmg
+          zip -r ../cf-zone-status.zip cf-zone-status.app
+          cd ../..
+          
+      - name: Extract version from tag
+        id: tag_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Tag version: $VERSION"
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            ## What's New
+            
+            * Monitor Cloudflare zones with security analytics
+            * View top blocks, IP hits, and DDoS events
+            * In-app API token configuration
+            * Auto-refresh every 5 minutes
+            * Menu bar app for easy access
+            
+            ## Installation
+            
+            ### Homebrew (Recommended)
+            
+            \`\`\`bash
+            brew tap sheyam/cf-zone-status
+            brew install --cask cf-zone-status
+            \`\`\`
+            
+            ### Manual Download
+            
+            1. Download \`cf-zone-status.zip\`
+            2. Extract and move \`cf-zone-status.app\` to Applications
+            3. First launch: Right-click > Open > Open
+          files: |
+            build/cf-zone-status.dmg
+            build/cf-zone-status.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
