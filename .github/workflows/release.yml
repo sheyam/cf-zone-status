@@ -21,29 +21,50 @@ jobs:
       
       - name: Build app
         run: |
-          cd cf-zone-status
-          xcodebuild -project ../cf-zone-status.xcodeproj \
+          mkdir -p build
+          xcodebuild -project cf-zone-status.xcodeproj \
             -scheme cf-zone-status \
             -configuration Release \
             -destination "generic/platform=macOS" \
-            -archivePath ../../build/cf-zone-status.xcarchive \
+            -archivePath build/cf-zone-status.xcarchive \
             archive \
             SDKROOT=macosx \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
       
       - name: Extract app from archive
         run: |
-          # Extract app directly from archive (no export needed for unsigned builds)
+          # Extract app directly from archive
           mkdir -p build/export
-          cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/export/ || true
+          if [ -d "build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app" ]; then
+            cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/export/
+          else
+            echo "Archive not found at expected path, searching..."
+            find . -name "cf-zone-status.app" -type d | head -1 | xargs -I {} cp -R {} build/export/
+          fi
       
       - name: Create DMG
         run: |
           mkdir -p build/dmg
-          cp -R build/export/cf-zone-status.app build/dmg/ || \
-            cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/dmg/
+          
+          # Find the app (check multiple possible locations)
+          if [ -d "build/export/cf-zone-status.app" ]; then
+            APP_PATH="build/export/cf-zone-status.app"
+          elif [ -d "build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app" ]; then
+            APP_PATH="build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app"
+          else
+            # Search for the app
+            APP_PATH=$(find . -name "cf-zone-status.app" -type d | head -1)
+            if [ -z "$APP_PATH" ]; then
+              echo "Error: Could not find cf-zone-status.app"
+              exit 1
+            fi
+          fi
+          
+          echo "Found app at: $APP_PATH"
+          cp -R "$APP_PATH" build/dmg/
           ln -s /Applications build/dmg/Applications
           
           hdiutil create -volname "cf-zone-status" \
