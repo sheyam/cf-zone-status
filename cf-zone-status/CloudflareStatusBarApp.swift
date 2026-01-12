@@ -6,7 +6,7 @@ struct CloudflareStatusBarApp: App {
     @StateObject private var appState = AppState()
     
     var body: some Scene {
-        MenuBarExtra("Cloudflare Status", systemImage: "cloud.fill") {
+        MenuBarExtra {
             VStack(spacing: 0) {
                 ContentView()
                     .environmentObject(appState)
@@ -34,6 +34,8 @@ struct CloudflareStatusBarApp: App {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             }
+        } label: {
+            Image(systemName: "shield.fill")
         }
         .menuBarExtraStyle(.window)
     }
