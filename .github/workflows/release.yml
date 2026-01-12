@@ -22,7 +22,7 @@ jobs:
       - name: Build app
         run: |
           cd cf-zone-status
-          xcodebuild -project cf-zone-status.xcodeproj \
+          xcodebuild -project ../cf-zone-status.xcodeproj \
             -scheme cf-zone-status \
             -configuration Release \
             -destination "generic/platform=macOS" \
