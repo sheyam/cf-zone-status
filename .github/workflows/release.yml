@@ -74,7 +74,7 @@ jobs:
             -ov -format UDZO \
             build/cf-zone-status.dmg
       
-      - name: Zip app (like CloudflareStatusBar)
+      - name: Zip app 
         run: |
           # Create ZIP with app directly at root (like CloudflareStatusBar)
           cd build/dmg
@@ -90,13 +90,14 @@ jobs:
             echo "version=$VERSION" >> $GITHUB_OUTPUT
             echo "Tag version: $VERSION"
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            # For manual dispatch, use the input or default to timestamp
-            VERSION=${GITHUB_REF#refs/heads/}
-            echo "version=$VERSION" >> $GITHUB_OUTPUT
-            echo "Workflow dispatch version: $VERSION"
+            # For manual dispatch, just build (no release will be created)
+            echo "Building from workflow_dispatch (no release will be created)"
+            echo "version=manual" >> $GITHUB_OUTPUT
           else
-            echo "Error: This workflow should only run on tag pushes (v*) or workflow_dispatch"
-            exit 1
+            echo "Warning: Workflow triggered by $GITHUB_EVENT_NAME on $GITHUB_REF"
+            echo "This workflow is designed for tag pushes (v*) or manual workflow_dispatch"
+            echo "Skipping version extraction"
+            echo "version=unknown" >> $GITHUB_OUTPUT
           fi
       
       - name: Create Release
