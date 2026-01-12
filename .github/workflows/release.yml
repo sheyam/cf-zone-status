@@ -21,7 +21,7 @@ jobs:
       
       - name: Build app
         run: |
-          cd xcode/cf-zone-status
+          cd cf-zone-status
           xcodebuild -project cf-zone-status.xcodeproj \
             -scheme cf-zone-status \
             -configuration Release \
