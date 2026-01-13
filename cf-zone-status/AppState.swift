@@ -146,4 +146,3 @@ class AppState: ObservableObject {
         refreshTimer?.invalidate()
     }
 }
-
