@@ -29,16 +29,22 @@ struct GraphQLErrorLocation: Codable {
 }
 
 struct GraphQLData: Codable {
-    let viewer: GraphQLViewer
+    let viewer: GraphQLViewer?
+    let account: GraphQLAccount?
 }
 
 struct GraphQLViewer: Codable {
     let zones: [GraphQLZone]?
 }
 
+struct GraphQLAccount: Codable {
+    let dosdAttackAnalyticsGroups: [DDoSAttackGroup]?
+}
+
 struct GraphQLZone: Codable {
     let firewallEventsAdaptiveGroups: [FirewallEventGroup]?
     let httpRequestsAdaptiveGroups: [HTTPRequestGroup]?
+    let dosdAttackAnalyticsGroups: [DDoSAttackGroup]?
 }
 
 // MARK: - Firewall Events (from firewallEventsAdaptiveGroups)
@@ -75,6 +81,32 @@ struct HTTPRequestSum: Codable {
     let visits: Int?
     let edgeResponseBytes: Int64?
     let bytes: Int?
+}
+
+// MARK: - DDoS Attack Analytics (from dosdAttackAnalyticsGroups)
+
+struct DDoSAttackGroup: Codable {
+    let startDatetime: String?
+    let endDatetime: String?
+    let attackType: String?
+    let action: String?
+    let peakBitsPerSecond: Int64?
+    let peakPacketsPerSecond: Int64?
+    let totalBits: Int64?
+    let totalPackets: Int64?
+    let attackVectors: [DDoSAttackVector]?
+}
+
+struct DDoSAttackVector: Codable {
+    let protocolName: String?
+    let sourcePort: Int?
+    let destinationPort: Int?
+    
+    enum CodingKeys: String, CodingKey {
+        case protocolName = "protocol"
+        case sourcePort
+        case destinationPort
+    }
 }
 
 // MARK: - AnyCodable for GraphQL Variables
