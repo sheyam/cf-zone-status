@@ -39,15 +39,16 @@ class AppState: ObservableObject {
         // Reload credentials in case they changed
         apiClient.reloadCredentials()
         
-        Task {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
             do {
-                isAuthenticated = try await apiClient.checkAuthentication()
-                if isAuthenticated {
-                    await loadData()
+                self.isAuthenticated = try await self.apiClient.checkAuthentication()
+                if self.isAuthenticated {
+                    await self.loadData()
                 }
             } catch {
-                isAuthenticated = false
-                errorMessage = "Authentication failed: \(error.localizedDescription)"
+                self.isAuthenticated = false
+                self.errorMessage = "Authentication failed: \(error.localizedDescription)"
             }
         }
     }
@@ -62,6 +63,7 @@ class AppState: ObservableObject {
             // Clear existing data when loading zones
             self.topBlocks = []
             self.ipHits = []
+            self.domainHits = []
             self.ddosEvents = []
         } catch {
             errorMessage = "Failed to load zones: \(error.localizedDescription)"
@@ -79,6 +81,9 @@ class AppState: ObservableObject {
         errorMessage = nil
         
         do {
+            // Fetch domain hits for all zones (doesn't require zone selection)
+            async let domainHitsTask = apiClient.fetchDomainHits(limit: 50)
+            
             if let zone = zone {
                 // Fetch data for selected zone only
                 async let blocksTask = apiClient.fetchTopBlocks(limit: 10, forZone: zone)
@@ -91,11 +96,15 @@ class AppState: ObservableObject {
                 self.ddosEvents = try await ddosTask
                 self.blockedRequestsCount = try await blockedCountTask
             } else {
-                // No zone selected - clear data
+                // No zone selected - clear zone-specific data
                 self.topBlocks = []
                 self.ipHits = []
                 self.ddosEvents = []
+                self.blockedRequestsCount = 0
             }
+            
+            // Always fetch domain hits regardless of zone selection
+            self.domainHits = try await domainHitsTask
         } catch {
             let errorDesc = error.localizedDescription
             errorMessage = "Failed to load zone data: \(errorDesc)"
@@ -107,6 +116,7 @@ class AppState: ObservableObject {
             // Clear data on error
             self.topBlocks = []
             self.ipHits = []
+            self.domainHits = []
             self.ddosEvents = []
             self.blockedRequestsCount = 0
         }
