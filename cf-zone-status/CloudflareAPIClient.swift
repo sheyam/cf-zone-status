@@ -11,25 +11,34 @@ class CloudflareAPIClient {
     }
     
     private func loadCredentials() {
-        // First, try UserDefaults (in-app settings) - highest priority
+        // First, try UserDefaults (in-app settings)
         if let storedToken = UserDefaults.standard.string(forKey: "CloudflareAPIToken"), !storedToken.isEmpty {
             apiToken = storedToken
             return
         }
         
-        // Second, try Wrangler credentials (same approach as CloudflareStatusBar)
-        let wranglerCreds = WranglerAuthService.shared.loadCredentials()
-        if let token = wranglerCreds.apiToken, !token.isEmpty {
-            apiToken = token
-            accountId = wranglerCreds.accountId
+        // Second, try environment variable (for development/testing)
+        if let envToken = ProcessInfo.processInfo.environment["CLOUDFLARE_API_TOKEN"], !envToken.isEmpty {
+            apiToken = envToken
             return
         }
         
-        // Note: Wrangler OAuth tokens from `wrangler login` cannot be used with REST API
-        // Users need to either:
-        // 1. Create an API token and add it to Wrangler config: api_token = "your-token"
-        // 2. Use the in-app Settings to enter API token directly
-        // 3. Set CLOUDFLARE_API_TOKEN environment variable
+        // Fallback to Wrangler config files
+        let configPaths = [
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/.wrangler/config/default.toml"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".wrangler/config/default.toml"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/.wrangler/config/default.toml"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/wrangler/config/default.toml")
+        ]
+        
+        for configPath in configPaths {
+            if let config = loadTOML(from: configPath) {
+                if let token = config["api_token"] as? String, !token.isEmpty {
+                    apiToken = token
+                    return
+                }
+            }
+        }
     }
     
     // Public method to set API token programmatically (for settings UI)
@@ -40,6 +49,31 @@ class CloudflareAPIClient {
     // Method to reload credentials (call after settings change)
     func reloadCredentials() {
         loadCredentials()
+    }
+    
+    private func loadTOML(from path: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: path),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        
+        var config: [String: Any] = [:]
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.contains("=") && !trimmed.starts(with: "#") {
+                let parts = trimmed.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 {
+                    let key = parts[0].trimmingCharacters(in: .whitespaces)
+                    var value = parts[1].trimmingCharacters(in: .whitespaces)
+                    // Remove quotes if present
+                    if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                        value = String(value.dropFirst().dropLast())
+                    }
+                    config[key] = value
+                }
+            }
+        }
+        return config
     }
     
     func checkAuthentication() async throws -> Bool {
@@ -435,70 +469,14 @@ class CloudflareAPIClient {
         return Array(allDomainHits.prefix(limit))
     }
     
-    // Fetch DDoS data by zone using dosdAttackAnalyticsGroups (account-level or zone-level API)
+    // Fetch DDoS data by zone using dosdAttackAnalyticsGroups (zone-level API) or firewall events fallback
     func fetchDDOSEvents(days: Int = 30, forZone zone: Zone) async throws -> [DDOSEvent] {
-        var allDDOSEvents: [DDOSEvent] = []
-        
         let endDate = Date()
         let startDate = Calendar.current.date(byAdding: .day, value: -days, to: endDate)!
         let startTime = formatISO8601DateTime(startDate)
         let endTime = formatISO8601DateTime(endDate)
         
-        // First, try account-level API if account ID is available
-        if let accountTag = accountId, !accountTag.isEmpty {
-            do {
-                let query = """
-                query GetDDoSAttacks($accountTag: String!, $since: Time!, $until: Time!) {
-                  account(tag: $accountTag) {
-                    dosdAttackAnalyticsGroups(
-                      filter: {
-                        datetime_geq: $since
-                        datetime_leq: $until
-                      }
-                      limit: 10000
-                      orderBy: [startDatetime_DESC]
-                    ) {
-                      startDatetime
-                      endDatetime
-                      attackType
-                      action
-                      peakBitsPerSecond
-                      peakPacketsPerSecond
-                      totalBits
-                      totalPackets
-                      attackVectors {
-                        protocol
-                        sourcePort
-                        destinationPort
-                      }
-                    }
-                  }
-                }
-                """
-                
-                let variables: [String: AnyCodable] = [
-                    "accountTag": AnyCodable(accountTag),
-                    "since": AnyCodable(startTime),
-                    "until": AnyCodable(endTime)
-                ]
-                
-                let response: GraphQLResponse<GraphQLData> = try await performGraphQLRequest(query: query, variables: variables)
-                
-                if let data = response.data,
-                   let account = data.account,
-                   let attacks = account.dosdAttackAnalyticsGroups {
-                    print("  - Found \(attacks.count) DDoS attack groups from account-level API")
-                    return try processDDoSAttacks(attacks, forZone: zone)
-                }
-            } catch {
-                print("  - Account-level DDoS API failed: \(error.localizedDescription)")
-                print("  - Falling back to zone-level API")
-            }
-        } else {
-            print("  - No account ID available, using zone-level API")
-        }
-        
-        // Fallback to zone-level GraphQL API
+        // First, try zone-level DDoS API
         do {
             let query = """
             query GetDDoSAttacks($zoneTag: String!, $since: Time!, $until: Time!) {
@@ -539,29 +517,102 @@ class CloudflareAPIClient {
             
             let response: GraphQLResponse<GraphQLData> = try await performGraphQLRequest(query: query, variables: variables)
             
-            guard let data = response.data,
-                  let viewer = data.viewer,
-                  let zones = viewer.zones,
-                  let zoneData = zones.first,
-                  let attacks = zoneData.dosdAttackAnalyticsGroups else {
-                print("  - No DDoS attack analytics returned from zone-level API")
-                print("  - Trying firewall events approach as fallback")
-                return try await fetchDDOSEventsFromFirewallEvents(days: days, forZone: zone)
+            if let data = response.data,
+               let viewer = data.viewer,
+               let zones = viewer.zones,
+               let zoneData = zones.first,
+               let attacks = zoneData.dosdAttackAnalyticsGroups {
+                print("  - Found \(attacks.count) DDoS attack groups from zone-level API")
+                return try processDDoSAttacks(attacks, forZone: zone)
+            }
+        } catch {
+            print("  - Zone-level DDoS API failed: \(error.localizedDescription)")
+            print("  - Falling back to firewall events approach")
+        }
+        
+        // Fallback to firewall events approach
+        return try await fetchDDOSEventsFromFirewallEvents(days: days, forZone: zone)
+    }
+    
+    // Helper method to process DDoS attack groups from dedicated API
+    private func processDDoSAttacks(_ attacks: [DDoSAttackGroup], forZone zone: Zone) throws -> [DDOSEvent] {
+        var allDDOSEvents: [DDOSEvent] = []
+        
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        for attack in attacks {
+            guard let startDatetimeString = attack.startDatetime,
+                  let startDate = formatter.date(from: startDatetimeString) else {
+                print("  - Skipping attack with invalid startDatetime")
+                continue
             }
             
-            print("  - Found \(attacks.count) DDoS attack groups from zone-level API")
-            return try processDDoSAttacks(attacks, forZone: zone)
+            let endDate: Date
+            if let endDatetimeString = attack.endDatetime,
+               let parsedEndDate = formatter.date(from: endDatetimeString) {
+                endDate = parsedEndDate
+            } else {
+                endDate = Calendar.current.date(byAdding: .hour, value: 1, to: startDate) ?? startDate
+            }
             
-        } catch {
-            print("Error fetching DDoS events for zone \(zone.name): \(error)")
-            print("  - Error details: \(error.localizedDescription)")
-            print("  - Trying firewall events approach as fallback")
-            return try await fetchDDOSEventsFromFirewallEvents(days: days, forZone: zone)
+            // Calculate peak RPS
+            let peakRps: Int
+            if let peakPackets = attack.peakPacketsPerSecond, peakPackets > 0 {
+                peakRps = Int(peakPackets)
+            } else if let peakBits = attack.peakBitsPerSecond, peakBits > 0 {
+                peakRps = Int(peakBits / 8 / 1500) // Estimate from bits
+            } else {
+                let duration = endDate.timeIntervalSince(startDate)
+                let totalRequests = attack.totalPackets ?? 0
+                peakRps = duration > 0 ? Int(Double(totalRequests) / duration) : Int(totalRequests)
+            }
+            
+            // Build attack type description
+            var attackTypeDescription = attack.attackType ?? "DDoS Attack"
+            if let action = attack.action, !action.isEmpty {
+                attackTypeDescription += " (\(action))"
+            }
+            
+            // Add attack vector information
+            if let vectors = attack.attackVectors, !vectors.isEmpty {
+                let vectorDescriptions = vectors.compactMap { vector -> String? in
+                    var desc = ""
+                    if let proto = vector.protocolName {
+                        desc += proto
+                    }
+                    if let srcPort = vector.sourcePort {
+                        desc += " src:\(srcPort)"
+                    }
+                    if let dstPort = vector.destinationPort {
+                        desc += " dst:\(dstPort)"
+                    }
+                    return desc.isEmpty ? nil : desc
+                }
+                if !vectorDescriptions.isEmpty {
+                    attackTypeDescription += " [\(vectorDescriptions.joined(separator: ", "))]"
+                }
+            }
+            
+            let attackId = "\(zone.id)-\(startDate.timeIntervalSince1970)-\(UUID().uuidString.prefix(8))"
+            
+            allDDOSEvents.append(DDOSEvent(
+                id: attackId,
+                zoneName: zone.name,
+                zoneId: zone.id,
+                attackType: attackTypeDescription,
+                startTime: startDate,
+                endTime: endDate,
+                peakRps: max(1, peakRps),
+                totalRequests: attack.totalPackets ?? 0,
+                mitigated: true
+            ))
         }
+        
+        return allDDOSEvents.sorted { $0.startTime > $1.startTime }
     }
     
     // Fallback method: Detect DDoS from firewall events using high-volume patterns
-    // Based on Cloudflare dashboard approach using firewallEventsAdaptiveGroups
     private func fetchDDOSEventsFromFirewallEvents(days: Int = 30, forZone zone: Zone) async throws -> [DDOSEvent] {
         var allDDOSEvents: [DDOSEvent] = []
         
@@ -571,8 +622,6 @@ class CloudflareAPIClient {
         let endTime = formatISO8601DateTime(endDate)
         
         do {
-            // Query firewall events grouped by datetime to detect high-volume attacks
-            // This approach groups events by time intervals to identify DDoS patterns
             let query = """
             query GetDDoSFromFirewallEvents($zoneTag: String!, $since: Time!, $until: Time!) {
               viewer {
@@ -623,13 +672,11 @@ class CloudflareAPIClient {
             let calendar = Calendar.current
             
             for eventGroup in eventGroups {
-                // Use datetime from dimensions if available, otherwise use current time
                 let datetimeKey: String
                 let eventDatetime: String?
                 
                 if let datetime = eventGroup.dimensions?.datetime {
                     eventDatetime = datetime
-                    // Group by hour for DDoS detection
                     if let date = formatter.date(from: datetime) {
                         let hour = calendar.component(.hour, from: date)
                         let day = calendar.component(.day, from: date)
@@ -637,12 +684,9 @@ class CloudflareAPIClient {
                         let year = calendar.component(.year, from: date)
                         datetimeKey = "\(year)-\(month)-\(day)-\(hour)"
                     } else {
-                        // Fallback: use first 13 chars (YYYY-MM-DDTHH)
                         datetimeKey = String(datetime.prefix(13))
                     }
                 } else {
-                    // No datetime in dimensions - this shouldn't happen with proper grouping
-                    // but handle gracefully
                     eventDatetime = nil
                     datetimeKey = "unknown-\(UUID().uuidString.prefix(8))"
                 }
@@ -671,13 +715,11 @@ class CloudflareAPIClient {
                 let isDistributed = data.uniqueIPs.count > 50
                 
                 if isHighVolume || (data.count > 500 && isDistributed) {
-                    // Parse datetime or use interval key to construct approximate time
                     let startDate: Date
                     if let datetimeString = data.datetime,
                        let parsedDate = formatter.date(from: datetimeString) {
                         startDate = parsedDate
                     } else if intervalKey != "unknown" && intervalKey.contains("-") {
-                        // Try to parse interval key (format: YYYY-MM-DD-HH)
                         let components = intervalKey.split(separator: "-")
                         if components.count >= 4,
                            let year = Int(components[0]),
@@ -690,7 +732,6 @@ class CloudflareAPIClient {
                             startDate = Calendar.current.date(byAdding: .hour, value: -1, to: endDate) ?? endDate
                         }
                     } else {
-                        // Fallback: use 1 hour ago
                         startDate = Calendar.current.date(byAdding: .hour, value: -1, to: endDate) ?? endDate
                     }
                     
@@ -728,90 +769,6 @@ class CloudflareAPIClient {
             print("  - Error in firewall events DDoS detection: \(error.localizedDescription)")
             return []
         }
-    }
-    
-    // Helper method to process DDoS attack groups
-    private func processDDoSAttacks(_ attacks: [DDoSAttackGroup], forZone zone: Zone) throws -> [DDOSEvent] {
-        var allDDOSEvents: [DDOSEvent] = []
-        
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        
-        // Process each attack group directly (they already have start/end times)
-        for attack in attacks {
-            guard let startDatetimeString = attack.startDatetime,
-                  let startDate = formatter.date(from: startDatetimeString) else {
-                print("  - Skipping attack with invalid startDatetime")
-                continue
-            }
-            
-            let endDate: Date
-            if let endDatetimeString = attack.endDatetime,
-               let parsedEndDate = formatter.date(from: endDatetimeString) {
-                endDate = parsedEndDate
-            } else {
-                // If no end time, estimate based on attack duration (default to 1 hour)
-                endDate = Calendar.current.date(byAdding: .hour, value: 1, to: startDate) ?? startDate
-            }
-            
-            // Calculate peak RPS from peakBitsPerSecond or peakPacketsPerSecond
-            // Use peakPacketsPerSecond as primary, fallback to bits-based estimate
-            let peakRps: Int
-            if let peakPackets = attack.peakPacketsPerSecond, peakPackets > 0 {
-                peakRps = Int(peakPackets)
-            } else if let peakBits = attack.peakBitsPerSecond, peakBits > 0 {
-                // Rough estimate: assume average packet size of 1500 bytes
-                peakRps = Int(peakBits / 8 / 1500)
-            } else {
-                // Fallback: calculate from total requests and duration
-                let duration = endDate.timeIntervalSince(startDate)
-                let totalRequests = attack.totalPackets ?? 0
-                peakRps = duration > 0 ? Int(Double(totalRequests) / duration) : Int(totalRequests)
-            }
-            
-            // Build attack type description
-            var attackTypeDescription = attack.attackType ?? "DDoS Attack"
-            if let action = attack.action, !action.isEmpty {
-                attackTypeDescription += " (\(action))"
-            }
-            
-            // Add attack vector information if available
-            if let vectors = attack.attackVectors, !vectors.isEmpty {
-                let vectorDescriptions = vectors.compactMap { vector -> String? in
-                    var desc = ""
-                    if let proto = vector.protocolName {
-                        desc += proto
-                    }
-                    if let srcPort = vector.sourcePort {
-                        desc += " src:\(srcPort)"
-                    }
-                    if let dstPort = vector.destinationPort {
-                        desc += " dst:\(dstPort)"
-                    }
-                    return desc.isEmpty ? nil : desc
-                }
-                if !vectorDescriptions.isEmpty {
-                    attackTypeDescription += " [\(vectorDescriptions.joined(separator: ", "))]"
-                }
-            }
-            
-            // Generate unique ID for this attack
-            let attackId = "\(zone.id)-\(startDate.timeIntervalSince1970)-\(UUID().uuidString.prefix(8))"
-            
-            allDDOSEvents.append(DDOSEvent(
-                id: attackId,
-                zoneName: zone.name,
-                zoneId: zone.id,
-                attackType: attackTypeDescription,
-                startTime: startDate,
-                endTime: endDate,
-                peakRps: max(1, peakRps), // Ensure at least 1 RPS
-                totalRequests: attack.totalPackets ?? 0,
-                mitigated: true
-            ))
-        }
-        
-        return allDDOSEvents.sorted { $0.startTime > $1.startTime }
     }
     
     // MARK: - Helper Methods
@@ -1005,46 +962,6 @@ enum APIError: LocalizedError {
             return message
         }
     }
-}
-
-// MARK: - Firewall Events Models
-
-struct FirewallEvent: Codable {
-    let action: String
-    let matchedAt: Date?
-    let source: EventSource?
-    let request: EventRequest?
-    let rule: EventRule?
-    
-    enum CodingKeys: String, CodingKey {
-        case action
-        case matchedAt = "matched_at"
-        case source
-        case request
-        case rule
-    }
-    
-    var clientIP: String? {
-        return source?.ip
-    }
-}
-
-struct EventSource: Codable {
-    let ip: String?
-    let country: String?
-}
-
-struct EventRequest: Codable {
-    let url: EventURL?
-    let method: String?
-}
-
-struct EventURL: Codable {
-    let path: String?
-}
-
-struct EventRule: Codable {
-    let id: String?
 }
 
 
