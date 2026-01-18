@@ -1,0 +1,161 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write  # Required to create releases
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest-stable'
+      
+      - name: Build app
+        run: |
+          mkdir -p build
+          xcodebuild -project cf-zone-status.xcodeproj \
+            -scheme cf-zone-status \
+            -configuration Release \
+            -destination "generic/platform=macOS" \
+            -archivePath build/cf-zone-status.xcarchive \
+            archive \
+            SDKROOT=macosx \
+            MACOSX_DEPLOYMENT_TARGET=13.0 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      
+      - name: Extract app from archive
+        run: |
+          # Extract app directly from archive
+          mkdir -p build/export
+          if [ -d "build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app" ]; then
+            cp -R build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app build/export/
+          else
+            echo "Archive not found at expected path, searching..."
+            find . -name "cf-zone-status.app" -type d | head -1 | xargs -I {} cp -R {} build/export/
+          fi
+      
+      - name: Create DMG
+        run: |
+          mkdir -p build/dmg
+          
+          # Find the app (check multiple possible locations)
+          if [ -d "build/export/cf-zone-status.app" ]; then
+            APP_PATH="build/export/cf-zone-status.app"
+          elif [ -d "build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app" ]; then
+            APP_PATH="build/cf-zone-status.xcarchive/Products/Applications/cf-zone-status.app"
+          else
+            # Search for the app
+            APP_PATH=$(find . -name "cf-zone-status.app" -type d | head -1)
+            if [ -z "$APP_PATH" ]; then
+              echo "Error: Could not find cf-zone-status.app"
+              exit 1
+            fi
+          fi
+          
+          echo "Found app at: $APP_PATH"
+          cp -R "$APP_PATH" build/dmg/
+          ln -s /Applications build/dmg/Applications
+          
+          hdiutil create -volname "cf-zone-status" \
+            -srcfolder build/dmg \
+            -ov -format UDZO \
+            build/cf-zone-status.dmg
+      
+      - name: Zip app (like CloudflareStatusBar)
+        run: |
+          # Create ZIP with app directly at root (like CloudflareStatusBar)
+          cd build/dmg
+          zip -r ../cf-zone-status.zip cf-zone-status.app
+          cd ../..
+          # Verify ZIP was created
+          if [ ! -f "build/cf-zone-status.zip" ]; then
+            echo "Error: ZIP file was not created"
+            exit 1
+          fi
+          ls -lh build/cf-zone-status.zip
+      
+      - name: Verify release artifacts
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "Verifying release artifacts..."
+          if [ ! -f "build/cf-zone-status.dmg" ]; then
+            echo "Error: DMG file not found"
+            exit 1
+          fi
+          if [ ! -f "build/cf-zone-status.zip" ]; then
+            echo "Error: ZIP file not found"
+            exit 1
+          fi
+          echo "DMG size: $(ls -lh build/cf-zone-status.dmg | awk '{print $5}')"
+          echo "ZIP size: $(ls -lh build/cf-zone-status.zip | awk '{print $5}')"
+          echo "Release artifacts verified successfully"
+      
+      - name: Extract version from tag
+        id: tag_version
+        run: |
+          # Only extract version if this is a tag push
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "Tag version: $VERSION"
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            # For manual dispatch, just build (no release will be created)
+            echo "Building from workflow_dispatch (no release will be created)"
+            echo "version=manual" >> $GITHUB_OUTPUT
+          else
+            echo "Warning: Workflow triggered by $GITHUB_EVENT_NAME on $GITHUB_REF"
+            echo "This workflow is designed for tag pushes (v*) or manual workflow_dispatch"
+            echo "Skipping version extraction"
+            echo "version=unknown" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            ## What's New
+            
+            * Monitor Cloudflare zones with security analytics
+            * View top blocks, IP hits, and DDoS events
+            * In-app API token configuration
+            * Auto-refresh every 5 minutes
+            * Menu bar app for easy access
+            
+            ## Installation
+            
+            ### Homebrew (Recommended)
+            
+            \`\`\`bash
+            brew tap sheyam/cf-zone-status
+            brew install --cask cf-zone-status
+            \`\`\`
+            
+            ### Manual Download
+            
+            1. Download \`cf-zone-status.zip\`
+            2. Extract and move \`cf-zone-status.app\` to Applications
+            3. First launch: Right-click > Open > Open
+          files: |
+            build/cf-zone-status.dmg
+            build/cf-zone-status.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
